@@ -1,0 +1,49 @@
+// ==UserScript==
+// @name         IHK Nordwestfalen „Reihe“ Zähler
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Fügt oben im Überblick eine Zähleranzeige hinzu: Anzahl der Zeilen mit class "reihe" im noc_table.
+// @match        https://www.weiterbildung-ihk-nordwestfalen.de/tibrosBB/azubiHeft.jsp*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    function addCounter() {
+        // find the table/div container
+        const table = document.querySelector('.noc_table');
+        if (!table) {
+            console.warn('noc_table nicht gefunden');
+            return;
+        }
+
+        // count the rows with class "reihe"
+        const rows = table.querySelectorAll('.reihe');
+        const count = rows.length;
+
+        // create a counter display
+        const counterEl = document.createElement('div');
+        counterEl.style.padding = '8px';
+        counterEl.style.background = '#f0f0f0';
+        counterEl.style.border = '1px solid #ccc';
+        counterEl.style.marginBottom = '10px';
+        counterEl.style.fontWeight = 'bold';
+        counterEl.textContent = `Anzahl Einträge: ${count}`;
+
+        // insert the counter above the table
+        table.parentNode.insertBefore(counterEl, table);
+
+        // optionally: observe for changes and update counter dynamically
+        const observer = new MutationObserver(() => {
+            const newCount = table.querySelectorAll('.reihe').length;
+            if (newCount !== count) {
+                counterEl.textContent = `Anzahl Einträge: ${newCount}`;
+            }
+        });
+        observer.observe(table, {childList: true, subtree: true});
+    }
+
+    // run when DOM is loaded
+    window.addEventListener('load', addCounter);
+})();
