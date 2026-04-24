@@ -1,49 +1,292 @@
 // ==UserScript==
-// @name         IHK Nordwestfalen „Reihe“ Zähler
+// @name         Azubi Heft – Status Filter
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Fügt oben im Überblick eine Zähleranzeige hinzu: Anzahl der Zeilen mit class "reihe" im noc_table.
-// @match        https://www.weiterbildung-ihk-nordwestfalen.de/tibrosBB/azubiHeft.jsp*
-// @grant        none
+// @version      4.0.0
+// @description  Replaces the original filter UI with custom filter buttons + counts. Multiple active filters use OR logic. Shows missing weeks count.
+// @author       You
+// @match        https://www.bildung-ihk-nordwestfalen.de/tibrosBB/azubiHeft.jsp*
+// @grant        GM_addStyle
+// @run-at       document-idle
 // ==/UserScript==
 
-(function() {
-    'use strict';
+(function () {
+  'use strict';
 
-    function addCounter() {
-        // find the table/div container
-        const table = document.querySelector('.noc_table');
-        if (!table) {
-            console.warn('noc_table nicht gefunden');
-            return;
-        }
+  const FILTERS = [
+    { label: 'In Bearbeitung', match: 'bearbeitung', color: '#f59e0b' },
+    { label: 'Warten auf Genehmigung', match: 'warten', color: '#3b82f6' },
+    { label: 'Abgelehnt', match: 'abgelehnt', color: '#ef4444' },
+    { label: 'Genehmigt', match: 'genehmigt', color: '#22c55e' },
+  ];
 
-        // count the rows with class "reihe"
-        const rows = table.querySelectorAll('.reihe');
-        const count = rows.length;
+  GM_addStyle(`
+    #azubi-filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 0 6px;
+      align-items: center;
+    }
+    #azubi-filter-bar .azubi-filter-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-right: 4px;
+    }
+    .azubi-filter-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px 4px 10px;
+      border-radius: 99px;
+      border: 2px solid transparent;
+      background: #f1f5f9;
+      color: #334155;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+      user-select: none;
+    }
+    .azubi-filter-btn:hover { background: #e2e8f0; }
+    .azubi-filter-btn.active {
+      background: var(--azubi-color);
+      color: #fff;
+      border-color: var(--azubi-color);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    .azubi-filter-btn .azubi-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--azubi-color);
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .azubi-filter-btn.active .azubi-dot { background: rgba(255,255,255,0.7); }
+    .azubi-filter-btn .azubi-count {
+      background: rgba(0,0,0,0.10);
+      border-radius: 99px;
+      padding: 0 6px;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .azubi-filter-btn.active .azubi-count { background: rgba(255,255,255,0.25); }
 
-        // create a counter display
-        const counterEl = document.createElement('div');
-        counterEl.style.padding = '8px';
-        counterEl.style.background = '#f0f0f0';
-        counterEl.style.border = '1px solid #ccc';
-        counterEl.style.marginBottom = '10px';
-        counterEl.style.fontWeight = 'bold';
-        counterEl.textContent = `Anzahl Einträge: ${count}`;
-
-        // insert the counter above the table
-        table.parentNode.insertBefore(counterEl, table);
-
-        // optionally: observe for changes and update counter dynamically
-        const observer = new MutationObserver(() => {
-            const newCount = table.querySelectorAll('.reihe').length;
-            if (newCount !== count) {
-                counterEl.textContent = `Anzahl Einträge: ${newCount}`;
-            }
-        });
-        observer.observe(table, {childList: true, subtree: true});
+    #azubi-missing-info {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px 4px 10px;
+      border-radius: 99px;
+      border: 2px dashed #a78bfa;
+      background: #f5f3ff;
+      color: #6d28d9;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: default;
+      user-select: none;
+    }
+    #azubi-missing-info .azubi-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #a78bfa;
+      flex-shrink: 0;
+    }
+    #azubi-missing-info .azubi-count {
+      background: rgba(109,40,217,0.12);
+      border-radius: 99px;
+      padding: 0 6px;
+      font-size: 11px;
+      line-height: 1.6;
     }
 
-    // run when DOM is loaded
-    window.addEventListener('load', addCounter);
+    #azubi-clear-btn {
+      margin-left: 4px;
+      padding: 4px 10px;
+      border-radius: 99px;
+      border: none;
+      background: none;
+      color: #94a3b8;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: none;
+    }
+    #azubi-clear-btn:hover { color: #ef4444; }
+    #azubi-clear-btn.visible { display: inline-block; }
+
+    .reihe.azubi-hidden { display: none !important; }
+  `);
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  function getStatus(reihe) {
+    for (const row of reihe.querySelectorAll('.row')) {
+      const labelEl = row.querySelector('.col-md-4');
+      const valueEl = row.querySelector('.col-md-8');
+      if (labelEl && valueEl && labelEl.textContent.trim().startsWith('Status')) {
+        return valueEl.textContent.trim().toLowerCase();
+      }
+    }
+    return '';
+  }
+
+  function countForFilter(match) {
+    let n = 0;
+    document.querySelectorAll('.reihe').forEach(r => {
+      if (getStatus(r).includes(match)) n++;
+    });
+    return n;
+  }
+
+  /** Parses "DD.MM.YYYY" → Date (midnight local) */
+  function parseDE(str) {
+    const [d, m, y] = str.trim().split('.');
+    return new Date(+y, +m - 1, +d);
+  }
+
+  /**
+   * Returns the Monday of the ISO week that contains `date`.
+   * This matches the site's pattern (weeks always start on Monday).
+   */
+  function getMonday(date) {
+    const d = new Date(date);
+    const day = d.getDay(); // 0 = Sun
+    const diff = (day === 0) ? -6 : 1 - day;
+    d.setDate(d.getDate() + diff);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  /** Collect all week-start dates (Mondays) that have an entry on the page. */
+  function getExistingWeekStarts() {
+    const starts = new Set();
+    document.querySelectorAll('.reihe').forEach(reihe => {
+      for (const row of reihe.querySelectorAll('.row')) {
+        const labelEl = row.querySelector('.col-md-4');
+        const valueEl = row.querySelector('.col-md-8');
+        if (labelEl && valueEl && labelEl.textContent.trim().startsWith('Zeitraum')) {
+          const text = valueEl.textContent.trim(); // e.g. "06.04.2026 - 12.04.2026"
+          const startStr = text.split('-')[0];
+          if (startStr) {
+            const monday = getMonday(parseDE(startStr));
+            starts.add(monday.getTime());
+          }
+          break;
+        }
+      }
+    });
+    return starts;
+  }
+
+  /** Count weeks from the earliest entry up to (but not including) the current week that have no entry. */
+  function countMissingWeeks() {
+    const existing = getExistingWeekStarts();
+    if (existing.size === 0) return 0;
+
+    const oldest = new Date(Math.min(...existing));
+    const currentMonday = getMonday(new Date());
+    currentMonday.setHours(0, 0, 0, 0);
+
+    let missing = 0;
+    const cursor = new Date(oldest);
+
+    while (cursor < currentMonday) {
+      if (!existing.has(cursor.getTime())) {
+        missing++;
+      }
+      cursor.setDate(cursor.getDate() + 7);
+    }
+
+    return missing;
+  }
+
+  // ── Active filter state ───────────────────────────────────────────────────
+  const activeFilters = new Set();
+
+  function applyFilters() {
+    document.querySelectorAll('.reihe').forEach(reihe => {
+      if (activeFilters.size === 0) {
+        reihe.classList.remove('azubi-hidden');
+        return;
+      }
+      const status = getStatus(reihe);
+      const matches = [...activeFilters].some(match => status.includes(match));
+      reihe.classList.toggle('azubi-hidden', !matches);
+    });
+
+    const clearBtn = document.getElementById('azubi-clear-btn');
+    if (clearBtn) clearBtn.classList.toggle('visible', activeFilters.size > 0);
+  }
+
+  // ── Build filter bar ──────────────────────────────────────────────────────
+  function buildFilterBar() {
+    const originalForm = document.querySelector('form.content-form[action="azubiHeft.jsp"]');
+    if (originalForm) originalForm.remove();
+
+    const boxTitel = document.querySelector('.box-titel');
+    if (!boxTitel) return;
+
+    const bar = document.createElement('div');
+    bar.id = 'azubi-filter-bar';
+
+    const lbl = document.createElement('span');
+    lbl.className = 'azubi-filter-label';
+    lbl.textContent = 'Filter:';
+    bar.appendChild(lbl);
+
+    FILTERS.forEach(filter => {
+      const count = countForFilter(filter.match);
+      const btn = document.createElement('button');
+      btn.className = 'azubi-filter-btn';
+      btn.style.setProperty('--azubi-color', filter.color);
+      btn.dataset.match = filter.match;
+      btn.innerHTML = `
+        <span class="azubi-dot"></span>
+        ${filter.label}
+        <span class="azubi-count">${count}</span>
+      `;
+      btn.addEventListener('click', () => {
+        if (activeFilters.has(filter.match)) {
+          activeFilters.delete(filter.match);
+          btn.classList.remove('active');
+        } else {
+          activeFilters.add(filter.match);
+          btn.classList.add('active');
+        }
+        applyFilters();
+      });
+      bar.appendChild(btn);
+    });
+
+    // ── Missing weeks badge ───────────────────────────────────────────────
+    const missingCount = countMissingWeeks() + countForFilter("bearbeitung");
+    const missingBadge = document.createElement('span');
+    missingBadge.id = 'azubi-missing-info';
+    missingBadge.title = 'Kalenderwochen ohne Eintrag (ältester Eintrag bis heute)';
+    missingBadge.innerHTML = `
+      <span class="azubi-dot"></span>
+      Fehlend
+      <span class="azubi-count">${missingCount}</span>
+    `;
+    bar.appendChild(missingBadge);
+
+    // ── Clear button ──────────────────────────────────────────────────────
+    const clearBtn = document.createElement('button');
+    clearBtn.id = 'azubi-clear-btn';
+    clearBtn.textContent = '✕ Alle zurücksetzen';
+    clearBtn.addEventListener('click', () => {
+      activeFilters.clear();
+      bar.querySelectorAll('.azubi-filter-btn').forEach(b => b.classList.remove('active'));
+      applyFilters();
+    });
+    bar.appendChild(clearBtn);
+
+    boxTitel.insertAdjacentElement('afterend', bar);
+  }
+
+  buildFilterBar();
+
 })();
